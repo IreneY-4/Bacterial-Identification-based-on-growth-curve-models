@@ -1,0 +1,872 @@
+---
+title: "Untitled"
+author: "Yuling Yang"
+date: "2023-07-17"
+output: html_document
+---
+
+```{r}
+library('gcplyr')
+library('dplyr')
+library('ggplot2')
+library("nlme")
+library("nlraa")
+library("performance")
+```
+
+# Data preprocessing
+```{r warning=FALSE}
+setwd("E:/warwick/Dissertation/DataAnalysis")
+data_clinical <- read.csv(file='Clinical.csv', header=TRUE) # import
+sum(is.na(data_clinical)) # checking missing values
+```
+
+
+##rename varaibles
+```{r}
+data_r <- data_clinical %>% 
+  rename('B_R1'=2, 'B_R2'=3, 'B_R3'=4,
+         "PC_R1"=5, "PC_R2"=6, "PC_R3"=7,
+         "ESBL_R1"=8, "ESBL_R2"=9, "ESBL_R3"=10,
+         "NonESBL_R1"=11, "NonESBL_R2"=12, "NonESBL_R3"=13,
+         "KP_R1"=14, "KP_R2"=15, "KP_R3"=16,
+         "PM_R1"=17, "PM_R2"=18, "PM_R3"=19,
+         "PA_R1"=20, "PA_R2"=21, "PA_R3"=22)
+```
+
+## transformation
+```{r}
+data_log <- data.frame(lapply(data_r[,-1], function(x) log(x/head(x,1))))
+data_log$Time <- data_r$Time
+
+data_tidy <- trans_wide_to_tidy(wides=data_log,id_cols = 'Time') 
+con <- matrix(unlist(strsplit(data_tidy$Well,"_")),ncol=2,byrow = T)
+data_t2 <- data_tidy
+data_t2$condition <- con[,1]
+data_t2$replicate <- con[,2]
+
+```
+
+# EDA
+growth curves
+```{r}
+p01 <- ggplot(data = data_t2,
+       aes(x = Time, y = Measurements , color = replicate)) +
+  geom_point(size=1)+
+  geom_line()+
+  labs(y="ln(Nt/N0)")+
+  facet_wrap(~condition,nrow = 2, shrink = F, dir='h')
+
+p01 + theme(axis.text = element_text(size = 10),    # Adjust axis label font size
+          axis.title = element_text(size = 15),   # Adjust axis title font size
+          legend.text = element_text(size = 12),  # Adjust legend text font size
+          legend.title = element_text(size = 16))+ # Adjust legend title font size
+  xlab("Time (minutes)")
+
+```
+```{r}
+p02 <- ggplot(data = data_t2,
+       aes(x = Time, y = Measurements, color = condition, 
+           shape=replicate)) +
+  geom_point(size=1)+
+  geom_line()+
+  scale_shape_manual(values = c(0,1, 2))+
+  labs(y='ln(Nt/N0)',color = "Bacterial Species", shape="Replicates") # Change the legend title here
+
+p02 + theme(axis.text = element_text(size = 10),    # Adjust axis label font size
+          axis.title = element_text(size = 15),   # Adjust axis title font size
+          legend.text = element_text(size = 12),  # Adjust legend text font size
+          legend.title = element_text(size = 16))+ # Adjust legend title font size
+  xlab("Time (minutes)")
+```
+
+##Models
+```{r}
+# Logistic Grwoth model
+LogitGrowth <- formula(Measurements~A/(1+exp(4*mu/A*(lamb-Time) +2)))
+
+# Gompertz Growth model
+GompGrowth <- formula(Measurements ~ A*exp(-exp(mu*exp(1)/A*(lamb-Time)+1)))
+
+# Baranyi-Roberts
+BR <- function(Time, mu, A, lamb) {
+  At <- Time + 1/mu*log(exp(-mu*Time)+exp(-mu*lamb)-exp(-mu*(Time+lamb)))
+  Yt <- mu*At-log(1+(exp(mu*At)-1)/exp(A))
+  return(Yt)
+}
+
+```
+
+
+## PC Uropathogenic ecoli (positive control) 
+```{r}
+data_PC <- data_t2[data_t2$condition=="PC",]
+```
+
+```{r}
+fit_PC_logit1 <- nlme(LogitGrowth, 
+                  data = data_PC,
+                  fixed = A+mu+lamb ~ 1,
+                  random = A+mu+lamb~ 1 |replicate,
+                  start = c(A=2,mu= 0.005, lamb=90),
+                  control = nlmeControl(maxIter = 100))
+summary(fit_PC_logit1)
+```
+
+
+###logistic growth
+```{r}
+fit_PC_logit2 <- nlme(LogitGrowth, 
+                  data = data_PC,
+                  fixed = A+mu+lamb ~ 1,
+                  random = A+mu~ 1 | replicate,
+                  start = c(A=2,mu= 0.005, lamb=90))
+summary(fit_PC_logit2)
+
+fit_PC_logit3 <- nlme(LogitGrowth, 
+                  data = data_PC,
+                  fixed = A+mu+lamb ~ 1,
+                  random = A+lamb ~ 1 | replicate,
+                  start = c(A=2,mu= 0.005, lamb=100))
+summary(fit_PC_logit3)
+
+fit_PC_logit4 <- nlme(LogitGrowth,
+                  data = data_PC,
+                  fixed = A+mu+lamb ~ 1,
+                  random = mu+lamb ~ 1 | replicate,
+                  start = c(A=2,mu= 0.005, lamb=100))
+summary(fit_PC_logit4)
+```
+```{r}
+anova(fit_PC_logit2, fit_PC_logit1)
+anova(fit_PC_logit3, fit_PC_logit1)
+anova(fit_PC_logit4, fit_PC_logit1)
+```
+```{r}
+fit_PC_logit5 <- update(fit_PC_logit4, random=mu ~ 1 | replicate)
+summary(fit_PC_logit5)
+
+fit_PC_logit6 <- update(fit_PC_logit4, random=lamb ~ 1 | replicate)
+summary(fit_PC_logit6)
+```
+
+```{r}
+anova(fit_PC_logit5, fit_PC_logit4)
+anova(fit_PC_logit6, fit_PC_logit4)
+```
+
+###Gompertz Growth
+```{r}
+fit_PC_Gomp1 <- nlme(GompGrowth, 
+                  data = data_PC,
+                  fixed = A+mu+lamb ~ 1,
+                  random = A+mu+lamb~ 1 |replicate,
+                  start = c(A=1,mu= 0.005, lamb=100))
+summary(fit_PC_Gomp1)
+```
+```{r}
+fit_PC_Gomp2 <- update(fit_PC_Gomp1, random =A+mu~ 1 |replicate )
+summary(fit_PC_Gomp2)
+
+fit_PC_Gomp3 <- update(fit_PC_Gomp1, random =A+lamb~ 1 |replicate )
+summary(fit_PC_Gomp3)
+
+fit_PC_Gomp4 <- update(fit_PC_Gomp1, random =lamb+mu~ 1 |replicate )
+summary(fit_PC_Gomp4)
+
+anova(fit_PC_Gomp2,fit_PC_Gomp1)
+anova(fit_PC_Gomp3,fit_PC_Gomp1)
+anova(fit_PC_Gomp4,fit_PC_Gomp1)
+```
+```{r}
+fit_PC_Gomp5<- update(fit_PC_Gomp4, random =mu~ 1 |replicate )
+summary(fit_PC_Gomp5)
+
+fit_PC_Gomp6<- update(fit_PC_Gomp4, random =lamb~ 1 |replicate )
+summary(fit_PC_Gomp6)
+
+anova(fit_PC_Gomp5,fit_PC_Gomp4)
+anova(fit_PC_Gomp6,fit_PC_Gomp4)
+```
+
+### Branyi-Robert
+
+```{r}
+fit_PC_BR <- nlme(Measurements ~ BR(Time, mu, A, lamb),
+                  data = data_PC,
+                  fixed = A+mu+lamb ~ 1,
+                  random = A+mu+lamb~ 1 | replicate,
+                  start = c(A=1,mu= 0.01, lamb=75),
+                  control = nlmeControl(maxIter = 500))
+
+summary(fit_PC_BR)
+```
+
+```{r}
+fit_PC_BR2 <- update(fit_PC_BR, random =A+mu~ 1 |replicate )
+summary(fit_PC_BR2)
+
+fit_PC_BR3 <- update(fit_PC_BR, random =A+lamb~ 1 |replicate)
+summary(fit_PC_BR3)
+
+fit_PC_BR4 <- update(fit_PC_BR, random =lamb+mu~ 1 |replicate )
+summary(fit_PC_BR4)
+
+anova(fit_PC_BR2, fit_PC_BR)
+anova(fit_PC_BR3, fit_PC_BR)
+anova(fit_PC_BR4, fit_PC_BR)
+```
+```{r}
+fit_PC_BR5 <- update(fit_PC_BR4, random =mu~ 1 |replicate )
+summary(fit_PC_BR5)
+
+fit_PC_BR6 <- update(fit_PC_BR4, random =lamb~ 1 |replicate )
+summary(fit_PC_BR6)
+
+anova(fit_PC_BR5, fit_PC_BR4)
+anova(fit_PC_BR6, fit_PC_BR4)
+```
+
+
+
+### Comparion
+```{r}
+IC_tab(fit_PC_Gomp4, fit_PC_logit4, fit_PC_BR4)
+R2M(fit_PC_Gomp4)
+R2M(fit_PC_logit4)
+R2M(fit_PC_BR4)
+
+rmse(fit_PC_Gomp4)
+rmse(fit_PC_logit4)
+rmse(fit_PC_BR4)
+```
+
+##ESBL Ecoli
+```{r}
+data_ESBL<- data_t2[data_t2$condition=="ESBL",]
+```
+
+###Logistic 
+```{r}
+fit_ESBL_logit1 <- nlme(LogitGrowth, 
+                  data = data_ESBL,
+                  fixed = A+mu+lamb ~ 1,
+                  random = A+mu+lamb~ 1 | replicate,
+                  start = c(A=1,mu= 0.005, lamb=100))
+summary(fit_ESBL_logit1)
+
+fit_ESBL_logit2 <- update(fit_ESBL_logit1,random=A+mu ~1|replicate)
+summary(fit_ESBL_logit2)
+
+fit_ESBL_logit3 <- update(fit_ESBL_logit1,random=A+lamb ~1|replicate)
+summary(fit_ESBL_logit3)
+
+fit_ESBL_logit4 <- update(fit_ESBL_logit1,random=mu+lamb ~1|replicate)
+summary(fit_ESBL_logit4)
+
+```
+
+```{r}
+anova(fit_ESBL_logit2, fit_ESBL_logit1)
+anova(fit_ESBL_logit3, fit_ESBL_logit1)
+anova(fit_ESBL_logit4, fit_ESBL_logit1)
+```
+```{r}
+fit_ESBL_logit5 <-update(fit_ESBL_logit2,random=A ~1|replicate)
+summary(fit_ESBL_logit5)
+
+fit_ESBL_logit6 <-update(fit_ESBL_logit2,random=mu ~1|replicate)
+summary(fit_ESBL_logit6)
+```
+
+```{r}
+anova(fit_ESBL_logit5, fit_ESBL_logit2)
+anova(fit_ESBL_logit6, fit_ESBL_logit2)
+```
+
+
+###Gompertz
+
+```{r}
+fit_ESBL_Gomp1 <- nlme(GompGrowth, 
+                  data = data_ESBL,
+                  fixed = A+mu+lamb ~ 1,
+                  random = A+mu+lamb~ 1 |replicate,
+                  start = c(A=2,mu= 0.005, lamb=100))
+summary(fit_ESBL_Gomp1)
+
+fit_ESBL_Gomp2 <- update(fit_ESBL_Gomp1, random=A+mu ~1|replicate)
+summary(fit_ESBL_Gomp2)
+
+fit_ESBL_Gomp3 <- update(fit_ESBL_Gomp1, random=A+lamb ~1|replicate)
+summary(fit_ESBL_Gomp3)
+
+fit_ESBL_Gomp4 <- update(fit_ESBL_Gomp1, random=mu+lamb ~1|replicate)
+summary(fit_ESBL_Gomp4)
+```
+```{r}
+anova(fit_ESBL_Gomp2, fit_ESBL_Gomp1)
+anova(fit_ESBL_Gomp3, fit_ESBL_Gomp1)
+anova(fit_ESBL_Gomp4, fit_ESBL_Gomp1)
+```
+```{r}
+fit_ESBL_Gomp5 <- update(fit_ESBL_Gomp2, random=A ~1|replicate)
+summary(fit_ESBL_Gomp5)
+
+fit_ESBL_Gomp6 <- update(fit_ESBL_Gomp2, random=mu ~1|replicate)
+summary(fit_ESBL_Gomp6)
+
+```
+```{r}
+anova(fit_ESBL_Gomp5, fit_ESBL_Gomp2)
+anova(fit_ESBL_Gomp6, fit_ESBL_Gomp2)
+```
+
+### BR 
+```{r}
+fit_ESBL_BR1 <- nlme(Measurements ~ BR(Time, mu, A, lamb), 
+                  data = data_ESBL,
+                  fixed = A+mu+lamb ~ 1,
+                  random = A+mu+lamb~ 1 |replicate,
+                  start = c(A=2,mu= 0.005, lamb=100))
+summary(fit_ESBL_BR1)
+
+fit_ESBL_BR2 <- update(fit_ESBL_BR1, random= A+mu~ 1 |replicate)
+summary(fit_ESBL_BR2)
+
+fit_ESBL_BR3 <- update(fit_ESBL_BR1, random= A+lamb~ 1 |replicate)
+summary(fit_ESBL_BR3)
+
+fit_ESBL_BR4 <- update(fit_ESBL_BR1, random= lamb+mu~ 1 |replicate)
+summary(fit_ESBL_BR4)
+
+anova(fit_ESBL_BR2, fit_ESBL_BR1)
+anova(fit_ESBL_BR3, fit_ESBL_BR1)
+anova(fit_ESBL_BR4, fit_ESBL_BR1)
+```
+
+```{r}
+fit_ESBL_BR5 <- update(fit_ESBL_BR2,random= A~ 1 |replicate)
+summary(fit_ESBL_BR5)
+
+fit_ESBL_BR6 <- update(fit_ESBL_BR2,random= mu~ 1 |replicate)
+summary(fit_ESBL_BR6)
+
+anova(fit_ESBL_BR5, fit_ESBL_BR2)
+anova(fit_ESBL_BR6, fit_ESBL_BR2)
+```
+
+###Comparsion
+```{r}
+IC_tab(fit_ESBL_Gomp2, fit_ESBL_logit2, fit_ESBL_BR2)
+R2M(fit_ESBL_Gomp2)
+R2M(fit_ESBL_logit2)
+R2M(fit_ESBL_BR2)
+
+rmse(fit_ESBL_Gomp2)
+rmse(fit_ESBL_logit2)
+rmse(fit_ESBL_BR2)
+```
+## NonESBL
+```{r}
+data_NonESBL<- data_t2[data_t2$condition=="NonESBL",]
+```
+### Logistic
+```{r}
+fit_NonESBL_logit1 <- nlme(LogitGrowth, 
+                  data = data_NonESBL,
+                  fixed = A+mu+lamb ~ 1,
+                  random = A+mu+lamb~ 1 | replicate,
+                  start = c(A=1,mu= 0.005, lamb=100))
+summary(fit_NonESBL_logit1)
+
+fit_NonESBL_logit2 <- update(fit_NonESBL_logit1,random=A+mu ~1|replicate)
+summary(fit_NonESBL_logit2)
+
+fit_NonESBL_logit3 <- update(fit_NonESBL_logit1,random=A+lamb ~1|replicate)
+summary(fit_NonESBL_logit3)
+
+fit_NonESBL_logit31 <- update(fit_NonESBL_logit3,fixed=A+mu~1,start = c(A=1,mu= 0.005))
+summary(fit_NonESBL_logit31)
+
+fit_NonESBL_logit4 <- update(fit_NonESBL_logit1,random=mu+lamb ~1|replicate)
+summary(fit_NonESBL_logit4)
+```
+
+
+```{r}
+anova(fit_NonESBL_logit2, fit_NonESBL_logit1)
+anova(fit_NonESBL_logit3, fit_NonESBL_logit1)
+anova(fit_NonESBL_logit4, fit_NonESBL_logit1)
+anova(fit_NonESBL_logit31, fit_NonESBL_logit1)
+```
+
+
+### Gompertz
+```{r}
+fit_NonESBL_Gomp1 <- nlme(GompGrowth, 
+                  data = data_NonESBL,
+                  fixed = A+mu+lamb ~ 1,
+                  random = A+mu+lamb~ 1 |replicate,
+                  start = c(A=2,mu= 0.005, lamb=100))
+summary(fit_NonESBL_Gomp1)
+
+fit_NonESBL_Gomp2 <- update(fit_NonESBL_Gomp1, random=A+mu ~1|replicate)
+summary(fit_NonESBL_Gomp2)
+
+fit_NonESBL_Gomp3 <- update(fit_NonESBL_Gomp1, random=A+lamb ~1|replicate)
+summary(fit_NonESBL_Gomp3)
+
+fit_NonESBL_Gomp31 <- update(fit_NonESBL_Gomp3, fixed=A+mu~1, start = c(A=2,mu= 0.005))
+summary(fit_NonESBL_Gomp31)
+
+fit_NonESBL_Gomp4 <- update(fit_NonESBL_Gomp1, random=mu+lamb ~1|replicate)
+summary(fit_NonESBL_Gomp4)
+```
+
+```{r}
+anova(fit_NonESBL_Gomp2, fit_NonESBL_Gomp1)
+anova(fit_NonESBL_Gomp3, fit_NonESBL_Gomp1)
+anova(fit_NonESBL_Gomp31, fit_NonESBL_Gomp1)
+anova(fit_NonESBL_Gomp4, fit_NonESBL_Gomp1)
+```
+
+
+### BR
+
+```{r}
+fit_NonESBL_BR1 <- nlme(Measurements ~ BR(Time, mu, A, lamb),
+                  data = data_NonESBL,
+                  fixed = A+mu+lamb ~ 1,
+                  random =A+mu+lamb~ 1 |replicate,
+                  start = c(A=2,mu= 0.005, lamb=100))
+summary(fit_NonESBL_BR1)
+```
+
+```{r}
+fit_NonESBL_BR2 <- update(fit_NonESBL_BR1,random =A+mu~ 1 |replicate)
+summary(fit_NonESBL_BR2)
+
+fit_NonESBL_BR3 <- update(fit_NonESBL_BR1,random =A+lamb~ 1 |replicate)
+summary(fit_NonESBL_BR3)
+fit_NonESBL_BR31 <- update(fit_NonESBL_BR3,fixed =A+mu~ 1,start = c(A=1,mu= 0.005))
+summary(fit_NonESBL_BR31)
+
+fit_NonESBL_BR4 <- update(fit_NonESBL_BR1,random =lamb+mu~ 1 |replicate, control=nlmeControl(maxIter = 100),start = c(A=1,mu= 0.005, lamb=100))
+summary(fit_NonESBL_BR4)
+fit_NonESBL_BR41 <- update(fit_NonESBL_BR4,fixed =A+mu~ 1,start = c(A=1,mu= 0.005))
+summary(fit_NonESBL_BR41)
+
+anova(fit_NonESBL_BR2, fit_NonESBL_BR1)
+anova(fit_NonESBL_BR3, fit_NonESBL_BR1)
+anova(fit_NonESBL_BR31, fit_NonESBL_BR1)
+anova(fit_NonESBL_BR4, fit_NonESBL_BR1)
+anova(fit_NonESBL_BR41, fit_NonESBL_BR1)
+```
+
+
+### comparison
+```{r}
+IC_tab(fit_NonESBL_Gomp1, fit_NonESBL_logit1, fit_NonESBL_BR1)
+R2M(fit_NonESBL_Gomp1)
+R2M(fit_NonESBL_logit1)
+R2M(fit_NonESBL_BR1)
+
+
+rmse(fit_NonESBL_Gomp1)
+rmse(fit_NonESBL_logit1)
+rmse(fit_NonESBL_BR1)
+```
+## KP
+```{r}
+data_KP<- data_t2[data_t2$condition=="KP",]
+```
+### Logistic
+```{r}
+fit_KP_logit1 <- nlme(LogitGrowth, 
+                  data = data_KP,
+                  fixed = A+mu+lamb ~ 1,
+                  random = A+mu+lamb~ 1 | replicate,
+                  start = c(A=1,mu= 0.005, lamb=100))
+summary(fit_KP_logit1)
+
+fit_KP_logit2 <- update(fit_KP_logit1,random=A+mu ~1|replicate)
+summary(fit_KP_logit2)
+
+fit_KP_logit3 <- update(fit_KP_logit1,random=A+lamb ~1|replicate)
+summary(fit_KP_logit3)
+
+fit_KP_logit4 <- update(fit_KP_logit1,random=mu+lamb ~1|replicate)
+summary(fit_KP_logit4)
+```
+
+
+```{r}
+anova(fit_KP_logit2, fit_KP_logit1)
+anova(fit_KP_logit3, fit_KP_logit1)
+anova(fit_KP_logit4, fit_KP_logit1)
+```
+
+
+### Gompertz
+```{r}
+fit_KP_Gomp1 <- nlme(GompGrowth, 
+                  data = data_KP,
+                  fixed = A+mu+lamb ~ 1,
+                  random = A+mu+lamb~ 1 |replicate,
+                  start = c(A=1,mu= 0.005, lamb=100))
+summary(fit_KP_Gomp1)
+
+fit_KP_Gomp2 <- update(fit_KP_Gomp1, random=A+mu ~1|replicate)
+summary(fit_KP_Gomp2)
+
+fit_KP_Gomp3 <- update(fit_KP_Gomp1, random=A+lamb ~1|replicate)
+summary(fit_KP_Gomp3)
+
+fit_KP_Gomp4 <- update(fit_KP_Gomp1, random=mu+lamb ~1|replicate)
+summary(fit_KP_Gomp4)
+```
+
+```{r}
+anova(fit_KP_Gomp2, fit_KP_Gomp1)
+anova(fit_KP_Gomp3, fit_KP_Gomp1)
+anova(fit_KP_Gomp4, fit_KP_Gomp1)
+```
+
+
+### BR
+```{r}
+fit_KP_BR1 <- nlme(Measurements ~ BR(Time, mu, A, lamb), 
+                  data = data_KP,
+                  fixed = A+mu+lamb ~ 1,
+                  random = A+mu+lamb~ 1 |replicate,
+                  start = c(A=2,mu= 0.01, lamb=150))
+summary(fit_KP_BR1)
+
+fit_KP_BR2 <- update(fit_KP_BR1, random= A+mu~ 1 |replicate)
+summary(fit_KP_BR2)
+
+fit_KP_BR3 <- update(fit_KP_BR1, random= A+lamb~ 1 |replicate)
+summary(fit_KP_BR3)
+
+fit_KP_BR4 <- update(fit_KP_BR1, random= lamb+mu~ 1 |replicate)
+summary(fit_KP_BR4)
+
+fit_KP_BR41 <- update(fit_KP_BR4, fixed = A+mu ~ 1, start=c(A=2, mu=0.01))
+summary(fit_KP_BR41)
+
+anova(fit_KP_BR2, fit_KP_BR1)
+anova(fit_KP_BR3, fit_KP_BR1)
+anova(fit_KP_BR41, fit_KP_BR1)
+```
+
+```{r}
+fit_KP_BR5 <- update(fit_KP_BR2,random= A~ 1 |replicate)
+summary(fit_KP_BR5)
+
+fit_KP_BR6 <- update(fit_KP_BR2,random= mu~ 1 |replicate)
+summary(fit_KP_BR6)
+
+anova(fit_KP_BR5, fit_KP_BR2)
+anova(fit_KP_BR6, fit_KP_BR2)
+```
+BR2
+
+### comparison
+```{r}
+IC_tab(fit_KP_Gomp1, fit_KP_logit1, fit_KP_BR2)
+R2M(fit_KP_Gomp1)
+R2M(fit_KP_logit1)
+R2M(fit_KP_BR2)
+
+
+rmse(fit_KP_Gomp1)
+rmse(fit_KP_logit1)
+rmse(fit_KP_BR2)
+```
+
+
+##PM
+```{r}
+data_PM<- data_t2[data_t2$condition=="PM",]
+```
+### Logistic
+```{r}
+fit_PM_logit1 <- nlme(LogitGrowth, 
+                  data = data_PM,
+                  fixed = A+mu+lamb ~ 1,
+                  random = A+mu+lamb~ 1 | replicate,
+                  start = c(A=1,mu= 0.005, lamb=100))
+summary(fit_PM_logit1)
+
+fit_PM_logit2 <- update(fit_PM_logit1,random=A+mu ~1|replicate)
+summary(fit_PM_logit2)
+
+fit_PM_logit3 <- update(fit_PM_logit1,random=A+lamb ~1|replicate)
+summary(fit_PM_logit3)
+
+fit_PM_logit4 <- update(fit_PM_logit1,random=mu+lamb ~1|replicate)
+summary(fit_PM_logit4)
+```
+
+
+```{r}
+anova(fit_PM_logit2, fit_PM_logit1)
+anova(fit_PM_logit3, fit_PM_logit1)
+anova(fit_PM_logit4, fit_PM_logit1)
+```
+
+### Gompertz
+```{r}
+fit_PM_Gomp1 <- nlme(GompGrowth, 
+                  data = data_PM,
+                  fixed = A+mu+lamb ~ 1,
+                  random = A+mu+lamb~ 1 |replicate,
+                  start = c(A=2,mu= 0.005, lamb=100))
+summary(fit_PM_Gomp1)
+
+fit_PM_Gomp2 <- update(fit_PM_Gomp1, random=A+mu ~1|replicate)
+summary(fit_PM_Gomp2)
+
+fit_PM_Gomp3 <- update(fit_PM_Gomp1, random=A+lamb ~1|replicate)
+summary(fit_PM_Gomp3)
+
+fit_PM_Gomp4 <- update(fit_PM_Gomp1, random=mu+lamb ~1|replicate)
+summary(fit_PM_Gomp4)
+```
+
+```{r}
+anova(fit_PM_Gomp2, fit_PM_Gomp1)
+anova(fit_PM_Gomp3, fit_PM_Gomp1)
+anova(fit_PM_Gomp4, fit_PM_Gomp1)
+```
+ 
+
+### BR
+```{r}
+fit_PM_BR1 <- nlme(Measurements ~ BR(Time, mu, A, lamb),
+                  data = data_PM,
+                  fixed = A+mu+lamb ~ 1,
+                  random =A+mu+lamb~ 1 |replicate,
+                  start = c(A=1.5,mu= 0.02, lamb=100), 
+                  control = nlmeControl(maxIter = 200))
+
+summary(fit_PM_BR1)
+
+fit_PM_BR2 <- update(fit_PM_BR1, random =A+mu~ 1 |replicate)
+summary(fit_PM_BR2)
+
+fit_PM_BR3 <- update(fit_PM_BR1, random =A+lamb~ 1 |replicate)
+summary(fit_PM_BR3)
+
+fit_PM_BR4 <- update(fit_PM_BR1, random =lamb+mu~ 1 |replicate)
+summary(fit_PM_BR4)
+```
+
+```{r}
+anova(fit_PM_BR2, fit_PM_BR1)
+anova(fit_PM_BR3, fit_PM_BR1)
+anova(fit_PM_BR4, fit_PM_BR1)
+```
+
+
+### comparison
+```{r}
+IC_tab(fit_PM_Gomp1, fit_PM_logit1, fit_PM_BR1)
+R2M(fit_PM_Gomp1)
+R2M(fit_PM_logit1)
+R2M(fit_PM_BR1)
+
+rmse(fit_PM_Gomp1)
+rmse(fit_PM_logit1)
+rmse(fit_PM_BR1)
+```
+
+## PA
+```{r}
+data_PA<- data_t2[data_t2$condition=="PA",]
+```
+### Logistic
+```{r}
+fit_PA_logit1 <- nlme(LogitGrowth, 
+                  data = data_PA,
+                  fixed = A+mu+lamb ~ 1,
+                  random = A+mu+lamb~ 1 | replicate,
+                  start = c(A=1,mu= 0.005, lamb=100))
+summary(fit_PA_logit1)
+
+fit_PA_logit2 <- update(fit_PA_logit1,random=A+mu ~1|replicate)
+summary(fit_PA_logit2)
+
+fit_PA_logit3 <- update(fit_PA_logit1,random=A+lamb ~1|replicate)
+summary(fit_PA_logit3)
+
+fit_PA_logit4 <- update(fit_PA_logit1,random=mu+lamb ~1|replicate)
+summary(fit_PA_logit4)
+```
+
+
+```{r}
+anova(fit_PA_logit2, fit_PA_logit1)
+anova(fit_PA_logit3, fit_PA_logit1)
+anova(fit_PA_logit4, fit_PA_logit1)
+```
+ 
+
+### Gompertz
+```{r}
+fit_PA_Gomp1 <- nlme(GompGrowth, 
+                  data = data_PA,
+                  fixed = A+mu+lamb ~ 1,
+                  random = A+mu+lamb~ 1 |replicate,
+                  start = c(A=2,mu= 0.005, lamb=100))
+summary(fit_PA_Gomp1)
+
+fit_PA_Gomp2 <- update(fit_PA_Gomp1, random=A+mu ~1|replicate)
+summary(fit_PA_Gomp2)
+
+fit_PA_Gomp3 <- update(fit_PA_Gomp1, random=A+lamb ~1|replicate)
+summary(fit_PA_Gomp3)
+
+fit_PA_Gomp4 <- update(fit_PA_Gomp1, random=mu+lamb ~1|replicate)
+summary(fit_PA_Gomp4)
+```
+
+```{r}
+anova(fit_PA_Gomp2, fit_PA_Gomp1)
+anova(fit_PA_Gomp3, fit_PA_Gomp1)
+anova(fit_PA_Gomp4, fit_PA_Gomp1)
+```
+ 
+
+
+### BR
+```{r}
+fit_PA_BR1 <- nlme(Measurements ~ BR(Time, mu, A, lamb),
+                  data = data_PA,
+                  fixed = A+mu+lamb ~ 1,
+                  random =A+mu+lamb~ 1 |replicate,
+                  start = c(A=2,mu= 0.01, lamb=300), 
+                  control = nlmeControl(maxIter = 200, msMaxIter = 200))
+summary(fit_PA_BR1)
+
+fit_PA_BR2 <- update(fit_PA_BR1, random =A+mu~ 1 |replicate)
+summary(fit_PA_BR2)
+
+fit_PA_BR3 <- update(fit_PA_BR1, random =A+lamb~ 1 |replicate)
+summary(fit_PA_BR3)
+fit_PA_BR4 <- update(fit_PA_BR1, random =lamb+mu~ 1 |replicate)
+summary(fit_PA_BR4)
+
+anova(fit_PA_BR2, fit_PA_BR1)
+anova(fit_PA_BR3, fit_PA_BR1)
+anova(fit_PA_BR4, fit_PA_BR1)
+```
+
+```{r}
+fit_PA_BR5 <- update(fit_PA_BR3, random =A~ 1 |replicate)
+summary(fit_PA_BR5)
+
+fit_PA_BR6 <- update(fit_PA_BR3, random =lamb~ 1 |replicate)
+summary(fit_PA_BR6)
+
+anova(fit_PA_BR5, fit_PA_BR3)
+anova(fit_PA_BR6, fit_PA_BR3)
+```
+ 
+
+### comparison
+```{r}
+IC_tab(fit_PA_Gomp1, fit_PA_logit1, fit_PA_BR3)
+R2M(fit_PA_Gomp1)
+R2M(fit_PA_logit1)
+R2M(fit_PA_BR3)
+
+rmse(fit_PA_Gomp1)
+rmse(fit_PA_logit1)
+rmse(fit_PA_BR3)
+```
+
+ 
+
+
+## identification
+
+### identifier estimates
+```{r}
+intervals(fit_PC_Gomp4, which = "fixed") # estimates and 95% confidence interval
+intervals(fit_ESBL_Gomp2, which = "fixed")
+intervals(fit_NonESBL_Gomp1, which = "fixed")
+intervals(fit_KP_Gomp1, which = "fixed")
+intervals(fit_PM_BR1, which = "fixed")
+intervals(fit_PA_Gomp1, which = "fixed")
+```
+
+
+### fitted curves
+```{r}
+fixed_fitted <-function(model){
+  pred <- predict(model, level=0)
+  pred <- pred[names(pred)=="R1"]
+  
+  return(pred)
+} # extract fitted values
+```
+
+```{r}
+pcp <- fixed_fitted(fit_PC_Gomp4)
+
+data_predict <- data.frame(Time=data_log$Time, PC=pcp) # contruct fitted value data frame
+data_predict$ESBL <- fixed_fitted(fit_ESBL_Gomp2)
+data_predict$NonESBL <- fixed_fitted(fit_NonESBL_Gomp1)
+data_predict$KP <- fixed_fitted(fit_KP_Gomp1)
+data_predict$PM <- fixed_fitted(fit_PM_BR1)
+data_predict$PA <- fixed_fitted(fit_PA_Gomp1)
+```
+
+```{r}
+dp_tidy <- trans_wide_to_tidy(wides=data_predict,id_cols = 'Time') 
+# convert to long form
+
+p03 <- ggplot(data = dp_tidy,
+       aes(x = Time, y = Measurements , color = Well)) +
+  geom_point(size=1)+
+  geom_line()+
+  labs(y="ln(Nt/N0)", color="Bacteria")
+
+p03 + theme(axis.text = element_text(size = 12),    # Adjust axis label font size
+          axis.title = element_text(size = 15),   # Adjust axis title font size
+          legend.text = element_text(size = 12),  # Adjust legend text font size
+          legend.title = element_text(size = 16))+ # Adjust legend title font size
+  xlab("Time (minutes)")
+```
+
+
+### distance
+```{r}
+curvedistance <- function(log_data, meth="manhattan"){
+  n <- length(log_data)
+  colna <- colnames(log_data)
+  df <- data.frame(sample=0,distance=0, species=0)
+  for (i in 1:n) {
+    logcount <- log_data[,i] 
+    distances <- data.frame(
+      PC = as.double(dist(rbind(data_predict$PC,logcount), method = meth)),
+      ESBL = as.double(dist(rbind(data_predict$ESBL,logcount), method = meth)),
+      NonESBL =as.double(dist(rbind(data_predict$NonESBL,logcount), method = meth)),
+      KP = as.double(dist(rbind(data_predict$KP,logcount), method = meth)),
+      PM = as.double(dist(rbind(data_predict$PM,logcount), method = meth)),
+      PA = as.double(dist(rbind(data_predict$PA,logcount), method = meth))
+    ) # distance from individual to each species 
+    mind <- apply(distances,1,min) # min distance
+    minc <- names(distances)[apply(distances,1,which.min)] # return the class of the min distance
+    df[i,] <- c(colna[i], mind,minc)
+  }
+  
+  return(df)
+} # calculated distance and make classification
+
+dtest <- data_log[,4:21]
+curvedistance(dtest)
+```
+
