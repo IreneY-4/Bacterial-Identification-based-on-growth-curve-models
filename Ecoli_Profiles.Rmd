@@ -1,0 +1,478 @@
+---
+title: "Ecoli_Profile"
+author: "Yuling Yang"
+date: "2023-07-24"
+output: 
+  html_document:
+    fig_caption: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  fig.width = 7,
+  fig.height = 5,
+  fig.align = "center"
+)
+```
+
+
+```{r warning=TRUE, include=FALSE}
+library('gcplyr')
+library('dplyr')
+library('ggplot2')
+library("scales")
+library("nlme")
+library('nlraa')
+library('performance')
+```
+
+# Data preprocessing
+```{r echo=FALSE, warning=FALSE}
+setwd("E:/warwick/Dissertation/DataAnalysis")
+data_ecoli<- read.csv(file='ecoli_profiles_set_1.csv', header=TRUE) # import Ecoli prodiles dataset
+
+# summary(data_ecoli) # summary of the dataset
+sum(is.na(data_ecoli)) # check for missing values
+```
+
+
+```{r echo=FALSE}
+data_r <- data_ecoli %>% 
+           rename("B_R1" =2, "B_R2"=3, "B_R3"=4, # blank replicates
+                  "PC_R1"=5,"PC_R2"=6,"PC_R3"=7, # positive control replicates
+                  "S10_R1"=8,"S10_R2"=9,"S10_R3"=10, #sample 1 without ampicillin
+                  "S11_R1"=11,"S11_R2"=12,"S11_R3"=13, #sample 1 with ampicillin
+                  "S20_R1"=14,"S20_R2"=15,"S20_R3"=16, #sample 2 without ampicillin
+                  "S21_R1"=17,"S21_R2"=18,"S21_R3"=19, #sample 2 with ampicillin
+                  "S30_R1"=20,"S30_R2"=21,"S30_R3"=22, #sample 3 without ampicilllin
+                  "S31_R1"=23,"S31_R2"=24,"S31_R3"=25) # sample 3 with ampicillin 
+
+str(data_r)
+```
+
+
+```{r echo=FALSE}
+# data transformation
+data_log <- data.frame(lapply(data_r[,-1], function(x) log(x/head(x,1))))
+data_log$Time <- data_r$Time
+```
+
+```{r echo=FALSE}
+data_tidy <- trans_wide_to_tidy(wides=data_log,id_cols = 'Time') 
+con <- matrix(unlist(strsplit(data_tidy$Well,"_")),ncol=2,byrow = T) #convert to long form
+data_t2 <- data_tidy
+data_t2$condition <- con[,1]
+data_t2$replicate <- con[,2] 
+```
+
+# 1. EDA
+
+## 1.1 Initial growth curves
+
+```{r echo=FALSE, "Figure 1:  Growth Curves", label='p1'}
+p <- ggplot(data = data_t2,
+       aes(x = Time, y = Measurements, color = condition, 
+           shape=replicate)) +
+  geom_point(size=1)+
+  geom_line()+
+  labs(y='ln(Nt/N0)')+
+  scale_shape_manual(values = c(0,1, 2))
+
+p + theme(axis.text = element_text(size = 15),    # Adjust axis label font size
+          axis.title = element_text(size = 15),   # Adjust axis title font size
+          legend.text = element_text(size = 12),  # Adjust legend text font size
+          legend.title = element_text(size = 16))+ # Adjust legend title font size
+  xlab("Time(minutes)")
+
+# ggsave("003.png",dpi = 300,path = "E:/warwick/Dissertation/plots",width = 20,height = 12,units = "cm")
+```
+
+```{r, fig.cap= "Figure 2: Separate Growth Curves"}
+p02 <- ggplot(data = data_t2,
+       aes(x = Time, y = Measurements, color = replicate)) +
+  geom_point(size = 0.8 )+
+  geom_line()+
+  labs(y='ln(Nt/N0)')+
+  facet_wrap(~condition,nrow = 2, shrink = F, dir='v')
+
+p02 + theme(axis.text = element_text(size = 10),    # Adjust axis label font size
+          axis.title = element_text(size = 15),   # Adjust axis title font size
+          legend.text = element_text(size = 12),  # Adjust legend text font size
+          legend.title = element_text(size = 16))+ # Adjust legend title font size
+  xlab("Time(minutes)")
+
+```
+
+# 2. Modelling
+
+## 2.1 Fitting the data
+
+```{r}
+# Logistic Grwoth model
+LogitGrowth <- formula(Measurements~A/(1+exp(4*mu/A*(lamb-Time) +2)))
+
+# Gompertz Growth model
+GompGrowth <- formula(Measurements ~ A*exp(-exp(mu*exp(1)/A*(lamb-Time)+1)))
+
+# Baranyi-Roberts
+BR <- function(Time, mu, A, lamb) {
+  At <- Time + 1/mu*log(exp(-mu*Time)+exp(-mu*lamb)-exp(-mu*(Time+lamb)))
+  Yt <- mu*At-log(1+(exp(mu*At)-1)/exp(A))
+  return(Yt)
+}
+```
+
+### 2.2.1 Samples without treatment
+
+```{r include=FALSE}
+data_no_treatment <- data_t2[data_t2$condition %in% c('S10',"S20","S30"),]
+```
+
+#### logistc
+```{r echo=TRUE, warning=FALSE}
+fit_0_logit1 <- nlme(LogitGrowth, 
+                  data = data_no_treatment,
+                  fixed = A+mu+lamb ~ 1,
+                  random = A+mu+lamb~ 1 | condition/replicate,
+                  start = c(A=1,mu= 0.005, lamb=100)) 
+summary(fit_0_logit1)
+
+fit_0_logit2 <- update(fit_0_logit1, random = A+mu~ 1 | condition/replicate)
+summary(fit_0_logit2)
+
+fit_0_logit3 <- update(fit_0_logit1, random = A+lamb~ 1 | condition/replicate)
+summary(fit_0_logit3)
+
+fit_0_logit4 <- update(fit_0_logit1, random = mu+lamb~ 1 | condition/replicate)
+summary(fit_0_logit4)
+```
+
+
+```{r}
+anova(fit_0_logit2, fit_0_logit1)  # LR test
+anova(fit_0_logit3, fit_0_logit1)
+anova(fit_0_logit4, fit_0_logit1)
+```
+
+#### Gompertz
+```{r echo=TRUE, warning=FALSE}
+fit_0_Gomp1 <- nlme(GompGrowth, 
+                  data = data_no_treatment,
+                  fixed = A+mu+lamb ~ 1,
+                  random =A+mu+lamb ~ 1 | condition/replicate,
+                  start = c(A=2,mu= 0.005, lamb=100)) # fitting
+summary(fit_0_Gomp1)
+
+fit_0_Gomp2 <- update(fit_0_Gomp1, random =A+mu ~ 1 | condition/replicate)
+summary(fit_0_Gomp2)
+
+fit_0_Gomp3 <- update(fit_0_Gomp1, random =A+lamb ~ 1 | condition/replicate)
+summary(fit_0_Gomp3)
+
+fit_0_Gomp4 <- update(fit_0_Gomp1, random =lamb+mu ~ 1 | condition/replicate)
+summary(fit_0_Gomp4)
+```
+
+```{r echo=TRUE, warning=FALSE}
+anova(fit_0_Gomp1, fit_0_Gomp2) # LR test
+anova(fit_0_Gomp1, fit_0_Gomp3)
+anova(fit_0_Gomp1, fit_0_Gomp4)
+```
+#### BR
+```{r}
+fit_0_BR1 <- nlme(Measurements ~ BR(Time, mu, A, lamb),
+                  data = data_no_treatment,
+                  fixed = A+mu+lamb ~ 1,
+                  random =A+mu+lamb ~ 1 | replicate,
+                  start = c(A=2,mu= 0.01, lamb=100))
+summary(fit_0_BR1)
+
+fit_0_BR2 <- update(fit_0_BR1, random =A+mu ~ 1 | replicate)
+summary(fit_0_BR2)
+
+fit_0_BR3 <- update(fit_0_BR1, random =A+lamb ~ 1 | replicate)
+summary(fit_0_BR3)
+
+fit_0_BR4 <- update(fit_0_BR1, random =lamb+mu ~ 1 | replicate)
+summary(fit_0_BR4)
+```
+
+```{r}
+anova(fit_0_BR2, fit_0_BR1) # LR test
+anova(fit_0_BR3, fit_0_BR1)
+anova(fit_0_BR4, fit_0_BR1)
+```
+```{r}
+fit_0_BR5 <- update(fit_0_BR4, random=A ~ 1 | replicate)
+summary(fit_0_BR5)
+
+fit_0_BR6 <- update(fit_0_BR4, random=mu ~ 1 | replicate)
+summary(fit_0_BR6)
+
+anova(fit_0_BR5, fit_0_BR2)
+anova(fit_0_BR6, fit_0_BR2)
+```
+
+#### Comparison/Model selection
+```{r }
+IC_tab(fit_0_Gomp1, fit_0_logit1, fit_0_BR5, criteria = "AIC")
+R2M(fit_0_Gomp1)
+R2M(fit_0_logit1)
+R2M(fit_0_BR5)
+
+rmse(fit_0_Gomp1)
+rmse(fit_0_logit1)
+rmse(fit_0_BR5)
+```
+ 
+Fitted growth curves for sample without treatment:
+```{r echo=FALSE, warning=FALSE, fig.cap="Figure 3: Fitted Growth curves of samples without treatment"}
+fv <- fitted(fit_0_Gomp1) # fitted values
+dfv <- data_no_treatment
+dfv$fv <- fv
+
+ggplot(data=dfv,aes(x=Time,y=Measurements))+
+  geom_point(size=2,aes(shape=replicate), color='navy')+
+  geom_line(aes(x=Time, y=fv, color=replicate),size=1.5)+
+  labs(x='Time(minutes)',y='ln(Nt/N0)')+
+  facet_wrap(~condition, shrink = F)+
+  scale_shape_manual(values = c(0,1,2), name = "Sample value") +
+  scale_color_manual(values = hue_pal()(3), name = "Fitted value")
+```
+
+### 2.2.2 Samples with treatment
+
+
+```{r}
+data_with_treatment <- data_t2[data_t2$condition %in% c('S11',"S21","S31"),]
+```
+
+#### Logistic
+```{r}
+fit_1_logit1 <- nlme(LogitGrowth, 
+                  data = data_with_treatment,
+                  fixed = A+mu+lamb ~ 1,
+                  random = A+mu+lamb~ 1 | condition/replicate,
+                  start = c(A=1,mu= 0.005, lamb=100))
+summary(fit_1_logit1)
+
+fit_1_logit2 <- update(fit_1_logit1, random = A+mu~ 1 | condition/replicate)
+summary(fit_1_logit2)
+
+fit_1_logit3 <- update(fit_1_logit1, random = A+lamb~ 1 | condition/replicate)
+summary(fit_1_logit3)
+
+fit_1_logit4 <- update(fit_1_logit1, random = mu+lamb~ 1 | condition/replicate)
+summary(fit_1_logit4)
+```
+
+```{r}
+anova(fit_1_logit2, fit_1_logit1)
+anova(fit_1_logit3, fit_1_logit1)
+anova(fit_1_logit4, fit_1_logit1)
+```
+
+#### Gompertz
+```{r}
+fit_1_Gomp1 <- nlme(GompGrowth, 
+                  data = data_with_treatment,
+                  fixed = A+mu+lamb ~ 1,
+                  random =A+mu+lamb ~ 1 | condition/replicate,
+                  start = c(A=2,mu= 0.005, lamb=100))
+summary(fit_1_Gomp1)
+
+fit_1_Gomp2 <- update(fit_1_Gomp1, random =A+mu ~ 1 | condition/replicate)
+summary(fit_1_Gomp2)
+
+fit_1_Gomp3 <- update(fit_1_Gomp1, random =A+lamb ~ 1 | condition/replicate)
+summary(fit_0_Gomp3)
+
+fit_1_Gomp4 <- update(fit_1_Gomp1, random =lamb+mu ~ 1 | condition/replicate)
+summary(fit_1_Gomp4)
+```
+
+```{r}
+anova(fit_1_Gomp1, fit_1_Gomp2)
+anova(fit_1_Gomp1, fit_1_Gomp3)
+anova(fit_1_Gomp1, fit_1_Gomp4)
+```
+
+#### Baranyi-Roberts
+```{r}
+fit_1_BR1 <- nlme(Measurements ~ BR(Time, mu, A, lamb),
+                  data = data_with_treatment,
+                  fixed = A+mu+lamb ~ 1,
+                  random =A+mu+lamb ~ 1| condition/replicate,
+                  start = c(A=2,mu= 0.01, lamb=100))
+summary(fit_1_BR1)
+
+fit_1_BR2 <- update(fit_1_BR1, random =A+mu ~ 1 | condition/replicate)
+summary(fit_1_BR2)
+
+fit_1_BR3 <- update(fit_1_BR1, random =A+lamb ~ 1 | condition/replicate)
+summary(fit_1_BR3)
+
+fit_1_BR4 <- update(fit_1_BR1, random =lamb+mu ~ 1 | condition/replicate)
+summary(fit_1_BR4)
+
+anova(fit_1_BR2, fit_1_BR1)
+anova(fit_1_BR3, fit_1_BR1)
+anova(fit_1_BR4, fit_1_BR1)
+```
+
+#### modified/Oscillatory
+```{r}
+moun <- function(Time, A,lamb, mu, xi, w){
+  lt <- lamb +A/mu-2*xi/w
+  Yt <- A-mu/w*exp(-xi*w*(Time-lt))*(2*xi*cos(w*sqrt(1-xi^2)*(Time-lt))+(2*xi^2-1)/sqrt(1-xi^2)*sin(w*sqrt(1-xi^2)*(Time-lt)))
+  return(Yt)
+}
+```
+
+```{r}
+m0 <- nlme(Measurements ~ moun(Time, A,lamb, mu, xi, w),
+                  data = data_with_treatment,
+                  fixed = A+mu+lamb+w+xi ~ 1,
+                  random =A~1 | condition/replicate,
+                  start = c(A=1.5,mu= 0.01, lamb=75, w=0.01, xi=0.5),
+                  control = nlmeControl(maxIter = 500, msMaxIter = 200)) # fitting using a forward strategy
+summary(m0)
+
+m0mu <- update(m0,random =mu~1 | condition/replicate)
+summary(m0mu)
+
+m0l <- update(m0, random =lamb~1 | condition/replicate)
+summary(m0l)
+
+m0w <- update(m0, random =w~1 | condition/replicate)
+summary(m0w)
+
+m0xi <- update(m0, random =xi~1 | condition/replicate)
+summary(m0xi)
+```
+
+
+```{r}
+m2 <- update(m0l, random = lamb+A~1 | condition/replicate)
+summary(m2)
+
+m3 <- update(m0l, random = mu+lamb~1 | condition/replicate)
+summary(m3)
+
+m4 <- update(m0l, random = lamb+w~1 | condition/replicate)
+summary(m4)
+
+m5 <- update(m0l, random = lamb+xi~1 | condition/replicate)
+summary(m5)
+
+anova(m2,m0l) # LR test
+anova(m3,m0l)
+anova(m4,m0l)
+anova(m5,m0l)
+```
+```{r}
+m6 <- update(m2,random = lamb+A+mu~1 | condition/replicate)
+             # start=c(A=1.6, mu=0.008, lamb=82.5, w=0.01, xi=0.6)
+             # start=c(A=1.6, mu=0.008, lamb=82.5, w=0.01, xi=0.6))
+summary(m6)
+
+m7 <- update(m2,random = lamb+A+w~1 | condition/replicate)
+summary(m7)
+
+m8 <- update(m2,random = lamb+A+xi~1 | condition/replicate)
+summary(m8)
+
+anova(m6,m2)
+anova(m7,m2)
+anova(m8,m2) 
+```
+Stops due to convergence problem
+```{r}
+# m9 <- update(m8,random = lamb+A+xi+mu~1 | condition/replicate,
+#              control = nlmeControl(maxIter = 500, msMaxIter = 200,
+#                       opt = "nlm"),
+#              start=c(A=1.5, mu=0.01, lamb=80, w=0.01, xi=0.6))
+# summary(m9)
+```
+
+
+```{r echo=FALSE, warning=FALSE, fig.cap="Figure 4: Fitted Growth curves of Oscillatory model"}
+dfv_osci <- data_with_treatment
+dfv_osci$fv <- fitted(m8) # fitted values
+
+ggplot(data=dfv_osci,aes(x=Time,y=Measurements))+
+  geom_point(size=2,aes(shape=replicate), color='navy')+
+  geom_line(aes(x=Time, y=fv, color=replicate),size=1)+
+  labs(x='Time',y='ln(Nt/N0)')+
+  facet_wrap(~condition, shrink = F)+
+  scale_shape_manual(values = c(0,1,2), name = "Sample value") +
+  scale_color_manual(values = hue_pal()(3), name = "Fitted value")
+```
+#### comparsion
+```{r}
+IC_tab(fit_1_BR1,fit_1_logit1,fit_1_Gomp1,m8)
+R2M(fit_1_BR1)
+R2M(fit_1_logit1)
+R2M(fit_1_Gomp1)
+R2M(m8)
+
+rmse(fit_1_BR1)
+rmse(fit_1_logit1)
+rmse(fit_1_Gomp1)
+rmse(m8)
+```
+
+
+## 2.3 identification
+```{r}
+fixed_fitted <-function(model){
+  pred <- predict(model, level=0) # fitted values using long fixed effect coeffcients
+  pred <- pred[names(pred) %in% c("S10", "S11")]
+  pred <- pred[seq(1,252,3)]
+  return(pred)
+}  # extract fitted values form the model
+```
+
+```{r}
+data_predicted <- data.frame(Time=data_log$Time, without_treatment = 
+data_predicted$with_treatment <- fixed_fitted(fit_1_Gomp1) # compllie fitted value data frame
+```
+
+```{r}
+dp_tidy <- trans_wide_to_tidy(wides=data_predicted,id_cols = 'Time') # convert to long form 
+
+ggplot(data = dp_tidy,
+       aes(x = Time, y = Measurements , color = Well)) +
+  geom_point(size=1)+
+  geom_line()+
+  labs(x = "Time(minutes)", y = "ln(Nt/N0)", color = "")
+```
+
+
+```{r}
+curvedistance <- function(log_data, meth="manhattan"){
+  n <- length(log_data)
+  colna <- colnames(log_data)
+  df <- data.frame(sample=0,distance=0, species=0)
+  for (i in 1:n) {
+    logcount <- log_data[,i] 
+    distances <- data.frame(
+      with_treatment = as.double(dist(rbind(data_predicted$with_treatment,logcount), method = meth)),
+      without_treatment=as.double(dist(rbind(data_predicted$without_treatment,logcount), method = meth)))
+    mind <- apply(distances,1,min) # the min distance
+    minc <- names(distances)[apply(distances,1,which.min)] # class od min distance
+    df[i,] <- c(colna[i], mind,minc) # combine the results
+  }
+  return(df)
+} # calculate the distance and classify baseon KNN when K=1
+
+dtest <- data_log[,7:24] 
+curvedistance(dtest)
+```
+
+
+
+
+
+
