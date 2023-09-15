@@ -1,0 +1,261 @@
+---
+title: "Concentration"
+author: "Yuling Yang"
+date: "2023-08-16"
+output: 
+  html_document:
+    fig_caption: yes
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  fig.width = 7,
+  fig.height = 5,
+  fig.align = "center"
+)
+```
+
+```{r include=FALSE}
+library('gcplyr')
+library('dplyr')
+library('ggplot2')
+library("nlme")
+library("psych")
+library("nlraa")
+library("performance")
+```
+
+# Data preproccessing
+```{r include=FALSE}
+setwd("E:/warwick/Dissertation/DataAnalysis")
+data_concentration <- read.csv("concentrations0.csv") # import
+sum(is.na(data_concentration)) # check for missing values
+
+data_r <- data_concentration %>%  
+  rename("R1_7"=2, "R2_7"=3, "R3_7"=4,
+         "R1_6"=5, "R2_6"=6, "R3_6"=7,
+         "R1_5"=8, "R2_5"=9, "R3_5"=10,
+         "R1_4"=11, "R2_4"=12, "R3_4"=13,
+         "R1_3"=14, "R2_3"=15, "R3_3"=16,
+         "R1_2"=17, "R2_2"=18, "R3_2"=19,
+         "R1_1"=20, "R2_1"=21, "R3_1"=22,
+         "R1_0"=23, "R2_0"=24, "R3_0"=25) # rename the variables
+```
+
+
+```{r}
+data_log <- data.frame(lapply(data_r[,-1], function(x) log(x/head(x,1)))) # transformation
+data_log$Time <- data_r$Time
+
+data_tidy <- trans_wide_to_tidy(wides=data_log,id_cols = 'Time')  # convert to long form
+con <- matrix(unlist(strsplit(data_tidy$Well,"_")),ncol=2,byrow = T)
+data_t2 <- data_tidy
+data_t2$replicate <- con[,1]
+data_t2$concentration<- con[,2]
+```
+
+# 1. EDA
+```{r echo=FALSE, fig.cap="Fig.1: Separate Growth Curves"}
+data_t3 <- data_t2
+data_t3$con <-factor(data_t3$concentration,
+                     labels =c("Blank","10","10^2","10^3",
+                               "10^4","10^5","10^6","10^7") ) # define labels
+
+p01 <- ggplot(data = data_t3,
+       aes(x = Time, y = Measurements , color = replicate)) +
+  geom_point(size=1.2)+
+  geom_line()+
+  labs(y="ln(Nt/N0)", color="Replicate")+
+  facet_wrap(~con,nrow = 2, shrink = F, dir='h',
+             labeller = label_parsed)
+p01 + theme(axis.text = element_text(size = 10.5),     
+          axis.title = element_text(size = 15),   
+          legend.text = element_text(size = 12),  
+          legend.title = element_text(size = 16),
+           strip.text = element_text(size = 13)) # setting size
+
+```
+
+
+```{r echo=FALSE, fig.cap="Fig.2: Combined Growth Curves"}
+p02 <- ggplot(data = data_t3,
+       aes(x = Time, y = Measurements, shape = replicate, color=con)) +
+  geom_point(size=1.2)+
+  geom_line()+
+  labs(y="ln(Nt/N0)", color="Concentration", shape="Replicate")
+
+p02 + theme(axis.text = element_text(size = 12),     
+          axis.title = element_text(size = 15),   
+          legend.text = element_text(size = 12),  
+          legend.title = element_text(size = 16))
+```
+
+
+# 2. Modelling
+
+## 2.1 models
+
+```{r}
+# Gompertz
+GompGrowth <- formula(Measurements ~ A*exp(-exp(mu*exp(1)/A*(lamb-Time)+1)))
+# Logistic
+LogitGrowth <- formula(Measurements~A/(1+exp(4*mu/A*(lamb-Time) +2)))
+# Baranyi-Roberts
+BR <- function(t, mu_m, lambda, A) {
+  A_t <- t + (1 / mu_m) * log(exp(-mu_m * t) + exp(-mu_m * lambda) - exp(-mu_m * (lambda + t)))
+  y_t <- mu_m * A_t - log(1 + (exp(mu_m * A_t) - 1) / exp(A))
+  return(y_t)
+}
+```
+
+```{r include=FALSE}
+df <- data_t2[data_t2$concentration!="0",]
+```
+
+
+
+### Gompertz
+
+```{r include=FALSE}
+Gomp1 <- nlme(GompGrowth, 
+                  data = df,
+                  fixed = A+mu+lamb ~ 1,
+                  random = A+mu+lamb~ 1 |concentration/replicate, # replicates level nested in concentration level
+                  start = c(A=1.5,mu= 0.01, lamb=100),
+              control = nlmeControl(maxIter = 100)) # fitting to nonlinear mixed effects model
+summary(Gomp1)
+
+Gomp2 <- update(Gomp1, random = A+mu~ 1 |concentration/replicate,
+                control = nlmeControl(maxIter = 5000,tolerance=0.05),
+                 start = c(A=1.6,mu= 0.006, lamb=138))
+summary(Gomp2)
+
+Gomp3 <- update(Gomp1, random = A+lamb~ 1 |concentration/replicate)
+summary(Gomp3)
+
+Gomp4 <- update(Gomp1, random = mu+lamb~ 1 |concentration/replicate)
+summary(Gomp4)
+
+anova(Gomp2, Gomp1) # LR test
+anova(Gomp3, Gomp1)
+anova(Gomp4, Gomp1)
+```
+
+### Logistic
+
+```{r include=FALSE}
+Lg1 <- nlme(LogitGrowth, 
+                  data = df,
+                  fixed = A+mu+lamb ~ 1,
+                  random = A+mu+lamb~ 1 |concentration/replicate,
+                  start = c(A=1.5,mu= 0.01, lamb=200),
+                  # start = c(A=1.5,mu= 0.005, lamb=200),
+              control = nlmeControl(maxIter = 100)) # fitting to nonlinear mixed effects model
+summary(Lg1)
+
+Lg2 <- update(Lg1, random = A+mu~ 1 |concentration/replicate)
+summary(Lg2)
+
+Lg3 <- update(Lg1, random = A+lamb~ 1 |concentration/replicate)
+summary(Lg3)
+
+Lg4 <- update(Lg1, random = mu+lamb~ 1 |concentration/replicate,
+              start = c(A=1.5,mu= 0.005, lamb=200))
+summary(Lg4)
+
+anova(Lg2, Lg1) # LR test
+anova(Lg3, Lg1)
+anova(Lg4, Lg1)
+```
+
+### BR
+```{r include=FALSE}
+BR1 <- nlme(Measurements ~ BR(Time,mu, lamb, A), 
+                  data = df,
+                  fixed = A+mu+lamb ~ 1,
+                  random = A+mu+lamb~ 1 |concentration/replicate,
+                  start = c(A=1.5,mu= 0.01, lamb=100),
+                  # start = c(A=1.5,mu= 0.005, lamb=200),
+              control = nlmeControl(maxIter = 100)) # fitting
+summary(BR1)
+
+BR2 <- update(BR1, random = A+mu~ 1 |concentration/replicate,
+              start = c(A=1.5,mu= 0.01, lamb=300))
+summary(BR2)
+
+BR3 <- update(BR1, random = A+lamb~ 1 |concentration/replicate)
+summary(BR3)
+
+
+BR4 <- update(BR1, random = mu+lamb~ 1 |concentration/replicate)
+summary(BR4)
+
+anova(BR2, BR1)
+anova(BR3, BR1)
+anova(BR4, BR1)
+```
+
+## 2.2 Comparsion
+
+```{r}
+IC_tab(Gomp1, Lg1, BR1) # calculate information criteria and Akaike weights
+R2M(Gomp1) # R-squared
+R2M(Lg1)
+R2M(BR1)
+
+rmse(Gomp1)
+rmse(Lg1)
+rmse(BR1)
+```
+
+# 3. Model interpretation
+
+```{r echo=FALSE, fig.cap="Fig.3: Fitted Growth Curves"}
+pred <- fitted(Gomp1,level = 1)
+preddf <- as.data.frame(pred)
+preddf$Concentration <- names(pred)
+preddf$Time <- df$Time
+fitted_values <- preddf[seq(1,1659,3),] # extract fitted valus at concentration level
+
+concentration_colors <- colorRampPalette(c("orange", "purple"))(n=7)
+
+p03 <- ggplot(data = fitted_values,
+       aes(x = Time, y = pred , color=Concentration)) +
+  geom_point(size=1.2)+
+  geom_line(size=0.8)+
+  labs(y="ln(Nt/N0)", x="Time(minutes)")+
+  scale_color_manual(values  = concentration_colors,
+                       labels = c("10","10^2","10^3","10^4"
+                                  ,"10^5","10^6","10^7"))
+p03
+```
+
+```{r}
+coef(Gomp1, level = 1) #Parameter Estimates as concentration Level
+```
+
+```{r echo=FALSE, fig.cap="Fig.4: Parameter Estimates at concentration Level"}
+a <- coef(Gomp1, level = 1)
+a$concentration <- c(1,2,3,4,5,6,7)
+
+b <- trans_wide_to_tidy(a, id_cols = 'concentration')
+b$well <- factor(b$Well,
+                 labels = c("A","lambda","mu[m]"))
+
+p04 <- ggplot(data=b,
+       aes(x=concentration,y=Measurements))+
+  geom_point(size=1.2)+
+  geom_line()+
+  facet_wrap(~well,scales = "free_y", labeller = label_parsed)+
+  labs(y="Coefficient",x="Cell Concentration")+
+  scale_x_continuous(breaks = c(1, 2, 3, 4, 5,6,7), 
+                     labels = c("10","10^2","10^3",
+                               "10^4","10^5","10^6","10^7"))
+p04
+```
+
+```{r}
+corr.test(a) # corrlation and test
+```
